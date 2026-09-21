@@ -5,6 +5,7 @@
     GET  /digests                          列出全部提交的摘要
     GET  /digests/{id}                     按 id 查询保存的完整酶切结果
     POST /digests/{id}/variant-analysis    基于已保存记录施加单碱基替换，重跑酶切并对比差异（不落库）
+    POST /digests/{id}/enzyme-panel-plan   枚举候选酶组合，寻找达到目标片段数的最少酶集合（只读，不落库）
     GET  /health                           健康检查
 """
 
@@ -17,11 +18,14 @@ from fastapi import FastAPI, HTTPException
 
 from .db import Database
 from .digest import run_digest
+from .panel import plan_enzyme_panel
 from .schemas import (
     DigestRequest,
     DigestResponse,
     DigestSummary,
     EnzymeIn,
+    EnzymePanelPlanRequest,
+    EnzymePanelPlanResponse,
     VariantAnalysisRequest,
     VariantAnalysisResponse,
 )
@@ -135,4 +139,40 @@ def analyze_variants(submission_id: int, request: VariantAnalysisRequest) -> dic
         "variants": variant_summary(sequence, request.variants),
         "cuts": diff_cuts(before["cuts"], after["cuts"]),
         "fragments": diff_fragments(before["fragments"], after["fragments"]),
+    }
+
+
+@app.post(
+    "/digests/{submission_id}/enzyme-panel-plan",
+    response_model=EnzymePanelPlanResponse,
+)
+def plan_panel(submission_id: int, request: EnzymePanelPlanRequest) -> dict:
+    # 先确认记录存在：不存在返回 404，且不泄露任何校验细节
+    record = db.get_submission(submission_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"submission {submission_id} not found")
+
+    # 仅在内存中枚举候选组合并复用酶切计算，原记录与数据库均不改动
+    plan = plan_enzyme_panel(
+        record["sequence"],
+        record["topology"],
+        request.candidates,
+        request.target_fragment_count,
+    )
+    if plan is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"no combination of the {len(request.candidates)} candidate "
+                f"enzyme(s) yields exactly {request.target_fragment_count} "
+                "fragment(s)"
+            ),
+        )
+
+    return {
+        "id": record["id"],
+        "target_fragment_count": request.target_fragment_count,
+        "selected_enzymes": [e.model_dump() for e in plan["enzymes"]],
+        "fragment_count": plan["fragment_count"],
+        "cuts": plan["cuts"],
     }

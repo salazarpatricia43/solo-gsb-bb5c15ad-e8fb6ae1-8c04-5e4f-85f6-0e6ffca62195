@@ -222,3 +222,27 @@ class VariantAnalysisResponse(BaseModel):
     cuts: CutDiffOut
     fragments: FragmentDiffOut
 
+
+# ---------- 酶组合面板规划 ----------
+
+
+class EnzymePanelPlanRequest(BaseModel):
+    """酶组合面板规划请求：目标片段数 + 1~8 种候选酶。
+
+    候选酶沿用 EnzymeIn 的全部校验（IUPAC 模式、切口偏移范围），
+    任一候选非法即整个请求以 422 拒绝。
+    """
+
+    target_fragment_count: int = Field(ge=1, examples=[3])
+    candidates: list[EnzymeIn] = Field(min_length=1, max_length=8)
+
+
+class EnzymePanelPlanResponse(BaseModel):
+    """规划结果：选中的最少酶集合、其切口与达到的片段数（恒等于目标值）。"""
+
+    id: int
+    target_fragment_count: int
+    selected_enzymes: list[EnzymeIn]
+    fragment_count: int
+    cuts: list[CutOut]
+
