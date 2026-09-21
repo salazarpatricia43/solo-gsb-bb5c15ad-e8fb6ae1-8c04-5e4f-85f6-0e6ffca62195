@@ -75,6 +75,48 @@ class DigestRequest(BaseModel):
         return _check_iupac(v, "sequence")
 
 
+class EnzymePanelPlanRequest(BaseModel):
+    """酶组合规划请求：目标片段数 + 1~8 种候选酶，酶名不可重复。"""
+
+    target_fragments: int = Field(
+        ge=1, description="期望酶切后恰好得到的片段数", examples=[3]
+    )
+    candidates: list[EnzymeIn] = Field(min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def _no_duplicate_candidate_names(self) -> "EnzymePanelPlanRequest":
+        seen: set[str] = set()
+        duplicates: set[str] = set()
+        for enzyme in self.candidates:
+            if enzyme.name in seen:
+                duplicates.add(enzyme.name)
+            seen.add(enzyme.name)
+        if duplicates:
+            raise ValueError(
+                "duplicate candidate enzyme names: "
+                + ", ".join(sorted(duplicates))
+            )
+        return self
+
+
+class PlannedEnzymeOut(BaseModel):
+    """入选组合中的酶（完整定义，便于直接复核与复用）。"""
+
+    name: str
+    pattern: str
+    cut_top: int
+    cut_bottom: int
+
+
+class EnzymePanelPlanResponse(BaseModel):
+    id: int
+    target_fragments: int
+    enzymes: list[PlannedEnzymeOut]
+    enzyme_count: int
+    cuts: list[CutOut]
+    fragment_count: int
+
+
 class VariantIn(BaseModel):
     """一个 0-based 单碱基替换：将 position 处碱基替换为 alt。
 

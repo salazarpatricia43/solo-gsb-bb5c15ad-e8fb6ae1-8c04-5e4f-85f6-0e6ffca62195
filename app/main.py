@@ -5,6 +5,7 @@
     GET  /digests                          列出全部提交的摘要
     GET  /digests/{id}                     按 id 查询保存的完整酶切结果
     POST /digests/{id}/variant-analysis    基于已保存记录施加单碱基替换，重跑酶切并对比差异（不落库）
+    POST /digests/{id}/enzyme-panel-plan   在候选酶中规划达到目标片段数的最少酶组合（不落库）
     GET  /health                           健康检查
 """
 
@@ -17,11 +18,14 @@ from fastapi import FastAPI, HTTPException
 
 from .db import Database
 from .digest import run_digest
+from .panel import plan_enzyme_panel
 from .schemas import (
     DigestRequest,
     DigestResponse,
     DigestSummary,
     EnzymeIn,
+    EnzymePanelPlanRequest,
+    EnzymePanelPlanResponse,
     VariantAnalysisRequest,
     VariantAnalysisResponse,
 )
@@ -136,3 +140,31 @@ def analyze_variants(submission_id: int, request: VariantAnalysisRequest) -> dic
         "cuts": diff_cuts(before["cuts"], after["cuts"]),
         "fragments": diff_fragments(before["fragments"], after["fragments"]),
     }
+
+
+@app.post(
+    "/digests/{submission_id}/enzyme-panel-plan",
+    response_model=EnzymePanelPlanResponse,
+)
+def plan_panel(submission_id: int, request: EnzymePanelPlanRequest) -> dict:
+    # 先确认记录存在：不存在返回 404
+    record = db.get_submission(submission_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"submission {submission_id} not found")
+
+    # 仅在内存中枚举候选组合并重跑酶切，原记录与数据库均不改动
+    plan = plan_enzyme_panel(
+        record["sequence"],
+        record["topology"],
+        request.candidates,
+        request.target_fragments,
+    )
+    if plan is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"no candidate combination yields exactly "
+                f"{request.target_fragments} fragment(s)"
+            ),
+        )
+    return {"id": record["id"], "target_fragments": request.target_fragments, **plan}

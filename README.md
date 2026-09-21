@@ -65,6 +65,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 | `GET` | `/digests` | 列出全部提交的摘要（按 id 升序） |
 | `GET` | `/digests/{id}` | 按 id 查询保存的完整酶切结果（不存在返回 404） |
 | `POST` | `/digests/{id}/variant-analysis` | 对已保存记录施加一组单碱基替换并重跑酶切，返回切口与片段长度差异（不落库，记录不存在返回 404） |
+| `POST` | `/digests/{id}/enzyme-panel-plan` | 在至多 8 种候选酶中枚举组合，规划恰好产生目标片段数的最少酶集合（不落库，记录不存在返回 404） |
 | `GET` | `/health` | 健康检查 |
 
 ### 提交示例
@@ -186,6 +187,80 @@ curl -X POST http://localhost:8000/digests/1/variant-analysis \
 - **稳定排序**：回显变异按 `position` 升序（与传入顺序无关）；切口差异按
   `(top_cut, bottom_cut)` 排序；片段差异按 `start` 排序，相同请求结果必然一致。
 
+## 酶组合规划（enzyme panel plan）
+
+基于已保存记录的**序列与拓扑**，从至多 **8 种候选酶**中枚举全部非空组合并复用
+酶切计算，寻找酶切后**恰好**得到目标片段数的**最少酶集合**。**规划过程不写库**：
+原记录保持不变，也不会产生新的提交；候选酶仅用于本次规划，与原记录的酶列表无关。
+
+### 请求
+
+```bash
+curl -X POST http://localhost:8000/digests/1/enzyme-panel-plan \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "target_fragments": 3,
+    "candidates": [
+      {"name": "EcoRI",  "pattern": "GAATTC", "cut_top": 1, "cut_bottom": 5},
+      {"name": "BamHI",  "pattern": "GGATCC", "cut_top": 1, "cut_bottom": 5},
+      {"name": "EcoRV",  "pattern": "GATATC", "cut_top": 3, "cut_bottom": 3},
+      {"name": "NoSite", "pattern": "TCTAGA", "cut_top": 1, "cut_bottom": 5}
+    ]
+  }'
+```
+
+- `target_fragments`：期望酶切后**恰好**得到的片段数，必须 ≥ 1。
+- `candidates`：候选酶列表，**1 ~ 8 种**，字段定义与 `/digests` 中的酶完全一致
+  （`pattern` 仅允许 IUPAC 碱基，`cut_top` / `cut_bottom` 范围为
+  `0 ~ len(pattern)`）；候选酶**不可重名**。
+
+### 择优规则
+
+1. **酶数最少**：优先返回能达到目标片段数的最小非空组合（单酶优先于双酶，以此类推）。
+2. **酶名序列稳定择优**：酶数相同时，按候选酶名排序后的**字典序**选择最小的组合。
+   结果只取决于候选集合本身，**与候选的传入顺序无关**。
+
+> 注意：目标是"恰好"产生目标片段数（片段数相等），不是"至少"。在线性序列上，
+> 一个无位点的候选酶会得到 1 条完整片段；在环形序列上，单个切口开环仍为 1 条片段。
+> 不同酶若产生相同的物理切口 `(top_cut, bottom_cut)`，切口只计一次。
+
+### 校验与状态码
+
+| 情形 | 状态码 |
+| --- | --- |
+| 记录不存在 | **404** |
+| 任何候选酶组合都无法恰好得到目标片段数 | **422** |
+| `target_fragments < 1` | **422** |
+| `candidates` 为空或多于 8 种 | **422** |
+| 候选酶重名 | **422** |
+| 候选酶偏移越界 / 模式含非 IUPAC 字符 | **422** |
+
+### 响应
+
+```json
+{
+  "id": 1,
+  "target_fragments": 3,
+  "enzymes": [
+    {"name": "BamHI", "pattern": "GGATCC", "cut_top": 1, "cut_bottom": 5},
+    {"name": "EcoRI", "pattern": "GAATTC", "cut_top": 1, "cut_bottom": 5}
+  ],
+  "enzyme_count": 2,
+  "cuts": [
+    {"top_cut": 1,  "bottom_cut": 5,  "end_type": "5prime", "overhang": "GATC",
+     "enzymes": ["BamHI"], "sites": ["...（完整位点对象）"]},
+    {"top_cut": 13, "bottom_cut": 17, "end_type": "5prime", "overhang": "AATT",
+     "enzymes": ["EcoRI"], "sites": ["...（完整位点对象）"]}
+  ],
+  "fragment_count": 3
+}
+```
+
+- `enzymes`：入选的最少酶集合（完整酶定义，按酶名字典序排列）。
+- `cuts`：该组合在记录序列上的完整切口列表，字段与 `/digests` 的切口对象一致，
+  按 `(top_cut, bottom_cut)` 排序。
+- `fragment_count`：该组合的实际片段数，等于 `target_fragments`。
+
 ## 结果字段约定
 
 - **坐标**：均为 0-based，作用于 top 链（提交序列方向）；切口位置 `c` 表示断裂
@@ -222,14 +297,16 @@ curl -X POST http://localhost:8000/digests/1/variant-analysis \
 app/
 ├── main.py      # FastAPI 入口与路由
 ├── digest.py    # 酶切核心算法（搜索、去重、片段生成）
+├── panel.py     # 酶组合规划（候选子集枚举、最少酶择优）
 ├── variant.py   # 变异施加与切口/片段差异对比
 ├── iupac.py     # IUPAC 编码表与反向互补
 ├── schemas.py   # 请求/响应模型与校验
 └── db.py        # SQLite 持久化（启动时自动建表）
 tests/
-├── test_digest.py       # 酶切算法测试
-├── test_api.py          # 提交/查询/校验 API 测试
-└── test_variant_api.py  # 变异影响分析 API 测试
+├── test_digest.py          # 酶切算法测试
+├── test_api.py             # 提交/查询/校验 API 测试
+├── test_variant_api.py     # 变异影响分析 API 测试
+└── test_enzyme_panel_api.py  # 酶组合规划 API 测试
 Dockerfile
 docker-compose.yml
 requirements.txt
